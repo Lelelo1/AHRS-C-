@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 
 using MathNet.Numerics.LinearAlgebra;
 using MathNet.Numerics.LinearAlgebra.Double;
@@ -33,7 +33,7 @@ namespace Logic.Ahrs.Magnetometer.Tyrex
             //H = H / H.Norm(needs arg);
             /* matlab says norm(v) return ecluidian norm https://www.mathworks.com/help/matlab/ref/norm.html
                which should be https://stackoverflow.com/questions/24335521/how-to-get-vector-magnitude-using-mathnet-numerics */
-            H = H / H.L2Norm(); 
+            H /= H.L2Norm(); 
 
             // set cordinateSystem
             // set quaternion
@@ -53,7 +53,7 @@ namespace Logic.Ahrs.Magnetometer.Tyrex
             var q = Quaternion;
 
             q = q * new Quaternion(0.5 * dT * DenseVector.OfVector(gyr));
-            q = q / q.Norm;
+            q /= q.Norm;
 
             Quaternion = q;
         }
@@ -74,6 +74,25 @@ namespace Logic.Ahrs.Magnetometer.Tyrex
             return result;
         }
 
+        public Vector<double> Quatrotate(Quaternion q, Vector<double> v)
+        {
+            q = q.Normalized;
+
+            var qX = (float)q.ImagX;
+            var qY = (float)q.ImagY;
+            var qZ = (float)q.ImagZ;
+            var qW = (float)q.Real;
+            var systemQ = new System.Numerics.Quaternion(new System.Numerics.Vector3(qX, qY, qZ), qW);
+
+            var vX = (float)v[0];
+            var vY = (float)v[1];
+            var vZ = (float)v[2];
+            var systemV = new System.Numerics.Vector3(vX, vY, vZ);
+
+            var r = System.Numerics.Vector3.Transform(systemV, systemQ);
+
+            return Vector<double>.Build.DenseOfArray(new double[] { r.X, r.Y, r.Z });
+        }
     }
     enum CordinateSystem
     {
@@ -82,4 +101,5 @@ namespace Logic.Ahrs.Magnetometer.Tyrex
         NED
     }
 
+    
 }
