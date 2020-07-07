@@ -1,12 +1,10 @@
 ﻿using System;
 using System.Collections.Generic;
-using MathNet.Numerics.LinearAlgebra;
-using MathNet.Spatial.Euclidean;
+using System.Numerics;
+using System.Linq;
 
-
-//using MathNet.Spatial.Euclidean;
-// https://github.com/tyrex-team/benchmarks-attitude-smartphones/blob/master/src/Filters/Implementations/QMichelObsExtmagWtRep.m
-namespace Logic.Ahrs.Magnetometer.Tyrex.Implementations
+// translation of ->  https://github.com/tyrex-team/benchmarks-attitude-smartphones/blob/master/src/Filters/Implementations/QMichelObsExtmagWtRep.m
+namespace Logic.Ahrs.Algorithms.Tyrex.Implementations
 {
     public class QMichelObsExtmagWtRep : AttitudeFilter
     {
@@ -32,10 +30,9 @@ namespace Logic.Ahrs.Magnetometer.Tyrex.Implementations
             MagUpdate = false;
         }
 
-        public override Quaternion Update(Vector<double> gyr, Vector<double> acc, Vector<double> mag, double dT)
+        protected override Quaternion Update(Vector3 gyr, Vector3 acc, Vector3 mag, double dT)
         {
-            var magUpdate = Math.Abs(mag.L2Norm() - MagRefNorm) < MagNormThreshold;
-
+            var magUpdate = Math.Abs(mag.Length() - MagRefNorm) < MagNormThreshold;
 
             // % Do not consider a magUpdate for next [timeMagNopert] seconds if a ~magUpdate is detected
             LastMagPerturbation = MagUpdate ? LastMagPerturbation + dT : LastMagPerturbation;
@@ -46,7 +43,7 @@ namespace Logic.Ahrs.Magnetometer.Tyrex.Implementations
 
             // obj.oldValues(end + 1,:) = [0 dT gyr acc mag obj.quaternion];
             // 1 + 1 + 3 + 3 + 3 + 4 -> 15 rows in oldValues
-            if (MagUpdate && !magUpdate)
+            if (MagUpdate && !magUpdate && OldValues.Count > 0)
             {
                 var tmpBeta = Beta;
                 Beta = 2;
@@ -54,12 +51,12 @@ namespace Logic.Ahrs.Magnetometer.Tyrex.Implementations
 
                 OldValues.ForEach((value) =>
                 {
-                    var dT = value.DT;
+                    var dTOld = value.DT;
                     var gyrOld = value.Gyr;
                     var accOld = value.Acc;
                     var magOld = value.Mag;
 
-                    updateInterval(gyrOld, accOld, magOld, dT, magUpdate);
+                    updateInterval(gyrOld, accOld, magOld, dTOld, magUpdate);
                 });
                 Beta = tmpBeta;
             }
@@ -79,53 +76,64 @@ namespace Logic.Ahrs.Magnetometer.Tyrex.Implementations
 
             return Quaternion;
         }
-        void updateInterval(Vector<double> gyr, Vector<double> acc, Vector<double> mag, double dT, bool magUpdate)
+        void updateInterval(Vector3 gyr, Vector3 acc, Vector3 mag, double dT, bool magUpdate)
         {
             var q = Quaternion;
 
-            acc /= acc.L2Norm();
-            mag /= mag.L2Norm();
+            acc /= acc.Length();
+            mag /= mag.Length();
 
             var estimate_A = Quatrotate(q, AccRefNormalized);
             var estimate_M = Quatrotate(q, MagRefNormalized);
+            
+            var messure = CreateMatrix(acc, mag);
+            var estimate = CreateMatrix(estimate_A, estimate_M);
 
-            var messure = Matrix<double>.Build.DenseOfRowVectors(acc, mag);
-            var estimate = Matrix<double>.Build.DenseOfRowVectors(estimate_A, estimate_M);
-
-            var a = Ka * Skew(estimate_A);
-            var m = magUpdate ? Km * Skew(estimate_M) : null; ;
-
-            Matrix<double> delta = a;
-            if (m != null)
+            // delta = 2 * [obj.Ka * skew(estimate_A) ; obj.Km * magUpdate * skew(estimate_M)]';
+            var a = Skew(estimate_A).Multiply(Ka);
+            Matrix4x4? m = null;
+            if(magUpdate)
             {
-                delta.Add(m);
+                m = Skew(estimate_M).Multiply(Km);
             }
-            delta *= 2;
 
-            var eye3 = Matrix<double>.Build.DiagonalIdentity(3, 3);
-            var dq = (messure - estimate) * ((delta * delta.Transpose() + 100000 * eye3).Power(-1) * delta).Transpose();
+            Matrix4x4 am = a; // []
+            if (m.HasValue)
+            {
+                am = Matrix4x4.Add(a, m.Value);
+            }
+            
+            var delta = am.Transpose() * 2;
+            //
 
-            var gyroQ = new Quaternion(0, gyr[0], gyr[1], gyr[2]);
-            var dqAsQ = new Quaternion(0, dq.Row(0)[0], dq.Row(0)[1], dq.Row(0)[2]); // should be a be a vector;
+            var eye3 = Matrix4x4.Identity; // is diagonalidentity
 
-            var qDot = 0.5 * q * gyroQ + Beta + q * dqAsQ;
-            q += qDot * dT;
-            q /= q.Norm;
+            var dq = (messure - estimate) * ((delta * delta.Transpose() * eye3.Add(0.00001)).Inverse() * delta).Transpose();
+
+            var gyrQ = new Quaternion(gyr.X, gyr.Y, gyr.Z, 0);
+            var dqAsQ = System.Numerics.Quaternion.CreateFromRotationMatrix(dq); // matlab code seems to assume as if dq is a vector
+
+            // does order of (Quaternin)muliplication matter ..?
+            //var qDot = 0.5 * q * gyroQ + Beta + q * dqAsQ;
+            var qDot = (q * gyrQ).Multiply(0.5f) + (q * dqAsQ).Multiply(Beta);
+            q += qDot.Multiply(dT);
+            q = q.Divide(q.Length());
 
             Quaternion = q;
-
+            Logic.Utils.Log.Message("QMichelObsExtmagWtRep quaternion became: " + Quaternion);
         }
+
     }
     public class Value
     {
         public double LastMagPerturbation { get; set; }
         public double DT { get; set; }
-        public Vector<double> Gyr { get; set; }
-        public Vector<double> Acc { get; set; }
-        public Vector<double> Mag { get; set; }
+        public Vector3 Gyr { get; set; }
+        public Vector3 Acc { get; set; }
+        public Vector3 Mag { get; set; }
         public Quaternion Quaternion { get; set; }
 
-        public Value(double lastMagPerturbation, double dT, Vector<double> gyr, Vector<double> acc, Vector<double> mag, Quaternion quaternion)
+        public Value(double lastMagPerturbation, double dT, Vector3 gyr, Vector3 acc, Vector3 mag, Quaternion quaternion)
         {
             LastMagPerturbation = lastMagPerturbation;
             DT = dT;
