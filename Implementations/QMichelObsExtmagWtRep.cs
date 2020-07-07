@@ -41,8 +41,6 @@ namespace Logic.Ahrs.Algorithms.Tyrex.Implementations
             // % If we detect a perturbation, we replay all previous values from current time - [timeToSavePreviousData]
             // % to current time without magnetic field updates
 
-            // obj.oldValues(end + 1,:) = [0 dT gyr acc mag obj.quaternion];
-            // 1 + 1 + 3 + 3 + 3 + 4 -> 15 rows in oldValues
             if (MagUpdate && !magUpdate && OldValues.Count > 0)
             {
                 var tmpBeta = Beta;
@@ -89,7 +87,7 @@ namespace Logic.Ahrs.Algorithms.Tyrex.Implementations
             var messure = CreateMatrix(acc, mag);
             var estimate = CreateMatrix(estimate_A, estimate_M);
 
-            // delta = 2 * [obj.Ka * skew(estimate_A) ; obj.Km * magUpdate * skew(estimate_M)]';
+            // --- delta = 2 * [obj.Ka * skew(estimate_A) ; obj.Km * magUpdate * skew(estimate_M)]';
             var a = Skew(estimate_A).Multiply(Ka);
             Matrix4x4? m = null;
             if(magUpdate)
@@ -104,7 +102,7 @@ namespace Logic.Ahrs.Algorithms.Tyrex.Implementations
             }
             
             var delta = am.Transpose() * 2;
-            //
+            // ---
 
             var eye3 = Matrix4x4.Identity; // is diagonalidentity
 
@@ -114,7 +112,6 @@ namespace Logic.Ahrs.Algorithms.Tyrex.Implementations
             var dqAsQ = System.Numerics.Quaternion.CreateFromRotationMatrix(dq); // matlab code seems to assume as if dq is a vector
 
             // does order of (Quaternin)muliplication matter ..?
-            //var qDot = 0.5 * q * gyroQ + Beta + q * dqAsQ;
             var qDot = (q * gyrQ).Multiply(0.5f) + (q * dqAsQ).Multiply(Beta);
             q += qDot.Multiply(dT);
             q = q.Divide(q.Length());

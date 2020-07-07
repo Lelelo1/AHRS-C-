@@ -15,8 +15,7 @@ namespace Logic.Ahrs.Algorithms.Tyrex
         protected Vector3 AccRef { get; set; } // % Gravity vector in Earth Frame
         protected Vector3 MagRef { get; set; } // % Magnetic vector in Magnetic Earth Frame
 
-        /* not seeming to be used in the AttitudeFilter file or the QMichelObsExtmagWtRep implementation which I looking to use */
-        // noises 
+        // noises;
         protected double AccMagAngleRef { get; set; } // % Angle between both vectors
 
         protected double MagRefNorm => MagRef.Length();
@@ -25,7 +24,7 @@ namespace Logic.Ahrs.Algorithms.Tyrex
         protected double AccRefNorm => AccRef.Length();
         protected Vector3 AccRefNormalized => Vector3.Normalize(AccRef);
 
-        // 'obj' which is passed in n many places seems to be the ase as C#'s 'this'
+        // 'obj' which is passed in many places seems to be the same as C#'s 'this'
         protected abstract Quaternion Update(Vector3 gyr, Vector3 acc, Vector3 mag, double dT);
 
         public bool HasInit { get; set; } = false;
@@ -35,8 +34,7 @@ namespace Logic.Ahrs.Algorithms.Tyrex
             // code found in generateAttitude.m...
             var magCalc = new Geo.Geomagnetism.IgrfGeomagnetismCalculator();// seems to be null always -> new Geo.Geomagnetism.GeomagnetismCalculator();
             
-            // location is null when algotithm is started!!!
-            var location = new Location(57.7027141, 11.916687); // LocationService.Instance.Location
+            var location = new Location(57.7027141, 11.916687);
             var cordinate = new Geo.Coordinate(location.Latitude, location.Longitude);
             var geoMagRes = magCalc.TryCalculate(cordinate, DateTime.UtcNow.Date.AddYears(-7));
             // nanoTesla to microTesla
