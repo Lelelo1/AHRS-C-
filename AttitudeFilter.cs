@@ -1,9 +1,10 @@
 ﻿using System;
 using System.Threading.Tasks;
 using Logic.Ahrs.Service;
-using Logic.Services;
-using System.Numerics;
 using Logic.Models;
+
+using MathNet.Numerics.LinearAlgebra;
+using MathNet.Spatial.Euclidean;
 
 // translation of -> https://github.com/tyrex-team/benchmarks-attitude-smartphones/blob/master/src/Filters/AttitudeFilter.m
 namespace Logic.Ahrs.Algorithms.Tyrex
@@ -11,54 +12,76 @@ namespace Logic.Ahrs.Algorithms.Tyrex
     // extends 'handle' in matlab source code
     public abstract class AttitudeFilter : IAlgorithm
     {
-        public Quaternion Quaternion { get; protected set; } = Quaternion.Identity;
-        protected Vector3 AccRef { get; set; } // % Gravity vector in Earth Frame
-        protected Vector3 MagRef { get; set; } // % Magnetic vector in Magnetic Earth Frame
+        public System.Numerics.Quaternion Quaternion => new System.Numerics.Quaternion((float)_Quaternion.ImagX, (float)_Quaternion.ImagY, (float)_Quaternion.ImagZ, (float)_Quaternion.Real);
 
-        // noises;
+        // seems to worsen result: // QTrueToMagnetic * value;
+        Quaternion _Q;
+        protected Quaternion _Quaternion { get => _Q; set => _Q = value; }
+        protected Vector<double> AccRef { get; set; } // % Gravity vector in Earth Frame
+        protected Vector<double> MagRef { get; set; } // % Magnetic vector in Magnetic Earth Frame
+
+        /* not seeming to be used in the AttitudeFilter file or the QMichelObsExtmagWtRep implementation which I looking to use */
+        // noises 
         protected double AccMagAngleRef { get; set; } // % Angle between both vectors
 
-        protected double MagRefNorm => MagRef.Length();
-        protected Vector3 MagRefNormalized => Vector3.Normalize(MagRef);
+        protected double MagRefNorm { get; set; }
+        protected Vector<double> MagRefNormalized { get; set; }
 
-        protected double AccRefNorm => AccRef.Length();
-        protected Vector3 AccRefNormalized => Vector3.Normalize(AccRef);
+        protected double AccRefNorm { get; set; }
+        protected Vector<double> AccRefNormalized { get; set; }
 
-        // 'obj' which is passed in many places seems to be the same as C#'s 'this'
-        protected abstract Quaternion Update(Vector3 gyr, Vector3 acc, Vector3 mag, double dT);
+
+        protected abstract void Update(Vector<double> gyr, Vector<double> acc, Vector<double> mag, double dT);
 
         public bool HasInit { get; set; } = false;
         TaskCompletionSource<Location> HasLocation = new TaskCompletionSource<Location>();
-        public void Init(Vector3 gyr, Vector3 acc, Vector3 mag)
+
+        Quaternion QMagneticToTrue { get; set; }
+        Quaternion QTrueToMagnetic => QMagneticToTrue.Inversed;
+
+        void Setup() // neccesary code from generateAttitude.m 
         {
-            // code found in generateAttitude.m...
             var magCalc = new Geo.Geomagnetism.IgrfGeomagnetismCalculator();// seems to be null always -> new Geo.Geomagnetism.GeomagnetismCalculator();
-            
-            var location = new Location(57.7027141, 11.916687);
+
+            // location is null when algotithm is started!!!
+            var location = new Location(57.7027141, 11.916687); // LocationService.Instance.Location
             var cordinate = new Geo.Coordinate(location.Latitude, location.Longitude);
             var geoMagRes = magCalc.TryCalculate(cordinate, DateTime.UtcNow.Date.AddYears(-7));
             // nanoTesla to microTesla
-            var magneticVector = new Vector3((float)geoMagRes.X / 1000, (float)geoMagRes.Y / 1000, (float)geoMagRes.Z / 1000);
-            var qTrueToMagnetic = Quaternion.Inverse(Quaternion.CreateFromRotationMatrix(Rotz(geoMagRes.Declination)));
-            MagRef = Quatrotate(qTrueToMagnetic, magneticVector);
+            var magneticVector = Vector<double>.Build.Dense(new double[] { geoMagRes.X / 1000, geoMagRes.Y / 1000, geoMagRes.Z / 1000 });
+            QMagneticToTrue = DCMToQuat(Rotz(geoMagRes.Declination));
+
+            MagRef = Quatrotate(QTrueToMagnetic, magneticVector); // <-- 16.1640627580741, 7.37659378025057, 47.9757030654843
             var gravityMagnitude = GeoidHeightsDotNet.GeoidHeights.undulation(location.Latitude, location.Latitude); // is -4.5 (is gAtLocation really?)
-            var gravityVector = new Vector3(0, 0, (float)-gravityMagnitude);
-            AccRef = Quatrotate(qTrueToMagnetic, gravityVector);
+            var gravityVector = new double[] { 0, 0, -gravityMagnitude }.ToVector();
+            AccRef = Quatrotate(QTrueToMagnetic, gravityVector);
+
             var c = (double)Math.Pow(10, -12); // 1e-12
-            MagRef =  MagRef.Abs().Any((double elementValue) => elementValue < c) ? Vector3.Zero : MagRef;
-            AccRef = AccRef.Abs().Any((elementValue) => elementValue < c) ? Vector3.Zero : AccRef;
+            Func<double, bool> when = (double value) => value < c;
+            MagRef = MagRef.SetAny(when, 0);
+            AccRef = AccRef.SetAny(when, 0);
 
-            var H = Vector3.Cross(mag, acc);
-            H /= H.Length();
+            // checked magref and accref in matlab and my magref is not correctly constructed:
+            // magref: 16.1640627580741, 7.37659378025057, 47.9757030654843
 
-            acc /= acc.Length();
-            var M = Vector3.Cross(acc, H);
+            ReferenceVectorChanged();
+        }
 
-            // dcm2Quat: The Direction Cosine Matrix to Quaternions block transforms a 3-by-3 direction cosine matrix (DCM) into a four-element unit quaternion vector (q0, q1, q2, q3)
-            var R = CreateMatrix(H, M, acc); // enu
+        public void Init(Vector<double> gyr, Vector<double> acc, Vector<double> mag)
+        {
+            Setup();
+            // end generateAttitude.m
 
-            var q = Quaternion.CreateFromRotationMatrix(R);
-            Quaternion = q;
+            var H = Cross(mag, acc);
+            H /= Norm(H);
+
+            acc /= Norm(acc);
+            var M = Cross(acc, H);
+
+            var R = CreateMatrix(H, M, acc, vectorsAsColumns: true); // enu
+
+            var q = DCMToQuat(R);
+            _Quaternion = q;
             
             HasInit = true;
         }
@@ -67,83 +90,221 @@ namespace Logic.Ahrs.Algorithms.Tyrex
         {
             var r = reading;
 
-            var gyr = new Vector3((float)r.gX, (float)r.gY, (float)r.gZ);
-            var acc = new Vector3((float)r.aX, (float)r.aY, (float)r.aZ);
-            var mag = new Vector3((float)r.mX, (float)r.mY, (float)r.mZ);
+            var gyr = new double[] { r.gX, r.gY, r.gZ }.ToVector();
+            var acc = new double[] { r.aX, r.aY, r.aZ }.ToVector();
+            var mag = new double[] { r.mX, r.mY, r.mZ }.ToVector();
 
             if (!HasInit)
             {
                 Init(gyr, acc, mag);
                 Logic.Utils.Log.Message("Algorithm was initialized");
             }
-
+           
             Update(gyr, acc, mag, dT);
         }
 
-        public Vector3 Quatrotate(Quaternion q, Vector3 v)
+        void ReferenceVectorChanged()
         {
-            return Vector3.Transform(v, Quaternion.Normalize(q));
-        }
-        // https://github.com/tyrex-team/benchmarks-attitude-smartphones/blob/master/src/Filters/Implementations/Utils/skew.m
-        protected Matrix4x4 Skew(Vector3 v)
-        {
-            
-            // (row, column) https://www.mathworks.com/help/matlab/math/array-indexing.html
-            var r12 = -v.Z; // (vector index decending=
-            var r13 = v.Y;
-            var r23 = -v.X;
+            MagRefNorm = Norm(MagRef);
+            AccRefNorm = Norm(AccRef);
+            AccMagAngleRef = Math.Atan2(Norm(Cross(AccRef, MagRef)), Dot(AccRef, MagRef));
 
-            var r21 = v.Z;
-            var r31 = -v.Y;
-            var r32 = v.X;
-            /*
+            MagRefNormalized = MagRef / MagRefNorm;
+            AccRefNormalized = AccRef / AccRefNorm;
+        }
+
+        // is ok!
+        protected Matrix<double> Combined(Matrix<double> m1, Matrix<double> m2)
+        {
+            /* [m1]
+               [m2] */
+            // https://stackoverflow.com/questions/50902794/matrix-concatenation-using-mathnet-numerics-linearalgebra-in-net-framework/62815400#62815400
+            return Matrix<double>.Build.DenseOfMatrixArray(new Matrix<double>[,] { { m1 }, { m2 } });
+        }
+
+        // is ok!
+        protected static double Dot(Vector<double> v1, Vector<double> v2)
+        {
+            return v1.DotProduct(v2);
+        }
+
+        // ok!
+        protected Vector<double> Quatrotate(Quaternion q, Vector<double> v, string form = "short")
+        {
+            var qw = q.Real; var qx = q.ImagX; var qy = q.ImagY; var qz = q.ImagZ;
+            var vx = v[0]; var vy = v[1]; var vz = v[2];
+
+            Vector<double> vo = null;
+
+            if (form == "long")
+            {
+                var x = vx * (qw.P(2) + qx.P(2) - qy.P(2) - qz.P(2)) + vy * (2 * qw * qz + 2 * qx * qy) - vz * (2 * qw * qy - 2 * qx * qz);
+                var y = vy * (qw.P(2) - qx.P(2) + qy.P(2) - qz.P(2)) - vx * (2 * qw * qz - 2 * qx * qy) + vz * (2 * qw * qx + 2 * qy * qz);
+                var z = vz * (qw.P(2) - qx.P(2) - qy.P(2) + qz.P(2)) + vx * (2 * qw * qy + 2 * qx * qz) - vy * (2 * qw * qx - 2 * qy * qz);
+
+                vo = new double[] { x, y, z }.ToVector();
+            }
+            else if (form == "short")
+            {
+                var x = vy * (2 * qw * qz + 2 * qx * qy) - vx * (2 * qy.P(2) + 2 * qz.P(2) - 1) - vz * (2 * qw * qy - 2 * qx * qz);
+                var y = vz * (2 * qw * qx + 2 * qy * qz) - vx * (2 * qw * qz - 2 * qx * qy) - vy * (2 * qx.P(2) + 2 * qz.P(2) - 1);
+                var z = vx * (2 * qw * qy + 2 * qx * qz) - vz * (2 * qx.P(2) + 2 * qy.P(2) - 1) - vy * (2 * qw * qx - 2 * qy * qz);
+
+                vo = new double[] { x, y, z }.ToVector();
+            }
+
+            return vo;
+        }
+
+        // ok!
+        protected double Norm(Vector<double> v)
+        {
+            return v.L2Norm();
+        }
+
+        // ok!
+        protected double Norm(Quaternion q)
+        {
+            return q.Norm;
+        }
+
+        // ok!
+        protected Vector<double> Cross(Vector<double> v1, Vector<double> v2)
+        {
+            return Vector3D.OfVector(v1).CrossProduct(Vector3D.OfVector(v2)).ToVector();
+        }
+
+        protected Quaternion DCMToQuat(Matrix<double> dcm)
+        {
+            var tr = dcm[0, 0] + dcm[1, 1] + dcm[2, 2];
+            Quaternion quat = MathNet.Spatial.Euclidean.Quaternion.Zero;
+
+            bool cond1 = tr > 0; // ok!
+            bool cond2 = (dcm[0, 0] > dcm[1, 1]) && (dcm[0, 0] > dcm[2, 2]); // ok!
+            bool cond3 = (dcm[1, 1] > dcm[2, 2]); // ok!
+            // else ok!
+
+            if (cond1)
+            {
+                var s = Math.Sqrt(tr + 1) * 2;
+
+                quat = new Quaternion(
+                    0.25 * s,
+                    (dcm[1, 2] - dcm[2, 1]) / s,
+                    (dcm[2, 0] - dcm[0, 2]) / s,
+                    (dcm[0, 1] - dcm[1, 0]) / s
+                    );
+            }
+            else if (cond2)
+            {
+                var s = Math.Sqrt(1 + dcm[0, 0] - dcm[1, 1] - dcm[2, 2]) * 2;
+
+                quat = new Quaternion(
+                    (dcm[1, 2] - dcm[2, 1]) / s,
+                    0.25 * s,
+                    (dcm[1, 0] + dcm[0, 1]) / s,
+                    (dcm[2, 0] + dcm[0, 2]) / s
+                    );
+            }
+            else if (cond3)
+            {
+                var s = Math.Sqrt(1 + dcm[1, 1] - dcm[0, 0] - dcm[2, 2]) * 2;
+                quat = new Quaternion(
+                    (dcm[2, 0] - dcm[0, 2]) / s,
+                    (dcm[1, 0] + dcm[0, 1]) / s,
+                    0.25 * s,
+                    (dcm[2, 1] + dcm[1, 2]) / s
+                    );
+            }
+            else
+            {
+                var s = Math.Sqrt(1 + dcm[2, 2] - dcm[0, 0] - dcm[1, 1]) * 2;
+
+                quat = new Quaternion(
+                    (dcm[0, 1] - dcm[1, 0]) / s,
+                    (dcm[2, 0] + dcm[0, 2]) / s,
+                    (dcm[2, 1] + dcm[1, 2]) / s,
+                    0.25 * s
+                    );
+            }
+            return quat;
+        }
+
+        // systen numerics transform and quatrotate.m give different result, can't test if tyrex translated quatrotate is correct
+        /*
+        public Vector3 MatlabQuatrotate(Quaternion q, Vector3 v)
+        {
+            // case short
+            // P is power
+            var qw = q.W; var qx = q.X; var qy = q.Y; var qz = q.Z;
+            var vx = v.X; var vy = v.Y; var vz = v.Z;
+
+            var x = vy*(2*qw*qz + 2*qx*qy) - vx*(2*qy.P(2) + 2*qz.P(2)-1) - vz*(2*qw*qy - 2*qx*qz);
+            var y = vz*(2*qw*qx + 2*qy*qz) - vx*(2*qw*qz - 2*qx*qy) - vy*(2*qx.P(2) + 2*qz.P(2) - 1);
+            var z = vx*(2*qw*qy + 2*qx*qz) - vz*(2*qx.P(2) + 2*qy.P(2) - 1) - vy*(2*qw*qx - 2*qy*qz);
+
+            return new Vector3(x, y, z);
+        }
+        */
+
+        // skew printed with skew.m with vector [2, 4, 8] 
+        //  which gives following matrix:       0    -8     4
+        //                                      8     0    -2
+        //                                     -4     2     0
+        protected Matrix<double> Skew(Vector<double> v)
+        {
+            // (row, column) https://www.mathworks.com/help/matlab/math/array-indexing.html
+            var r12 = -v[2]; // vector index decending
+            var r13 = v[1];
+            var r23 = -v[0];
+
+            var r21 = v[2];
+            var r31 = -v[1];
+            var r32 = v[0];
+
             var arr1 = new double[] { 0, r12, r13 };
             var arr2 = new double[] { r21, 0, r23 };
             var arr3 = new double[] { r31, r32, 0 };
-            */
-            var m = new Matrix4x4(
-                0, r12, r13, 0,
-                r21, 0, r23, 0,
-                r31, r32, 0, 0,
-                0, 0, 0, 1
-                );
 
-
-            return m; 
+            return CreateMatrix(arr1.ToVector(), arr2.ToVector(), arr3.ToVector());
+            // Tested is correct!
         }
 
-        protected Matrix4x4 Rotz(double t) // could be wrong!
+        protected Matrix<double> Rotz(double t) // could be wrong!
         {
-            t /= (180 * Math.PI);
-            var ct = Math.Cos(t);
-            var st = Math.Sin(t);
+            t = (t / 180) * Math.PI;
 
-            var v1 = new Vector3((float)ct, (float)-st, (float)0);
-            var v2 = new Vector3((float)st, (float)ct, 0);
-            var v3 = new Vector3(0, 0, 1);
+            var ct = (float)Math.Cos(t);
+            var st = (float)Math.Sin(t);
 
-            return Matrix4x4.CreateWorld(v1, v2, v3);
+            var arr1 = new double[] { ct, -st, 0 };
+            var arr2 = new double[] { st, ct, 0 };
+            var arr3 = new double[] { 0, 0, 1 };
+
+            return CreateMatrix(arr1.ToVector(), arr2.ToVector(), arr3.ToVector());
+            // Tested is correct!
         }
 
-       
-        // practical method https://stackoverflow.com/questions/57921365/why-is-there-no-matrix3x3-in-the-system-numerics-namespace-c-sharp/57923547#comment110976749_57923547
-        protected Matrix4x4 CreateMatrix(Vector3 v1, Vector3 v2)
+        // placing vectors in rows, which flows better with the matlab syntax: [ r11, r12, r13; 
+        //                                                                       r21, r22, r23 ]
+        // and is more left to right readable
+        protected Matrix<double> CreateMatrix(Vector<double> v1, Vector<double> v2)
         {
-            return new Matrix4x4(
-                v1.X, v1.Y, 0, 0,
-                v1.Y, v2.Y, 0, 0,
-                v1.Z, v2.Z, 0, 0,
-                0, 0, 0, 1
-                );
+            return Matrix<double>.Build.DenseOfRowVectors(v1, v2);
         }
-        protected Matrix4x4 CreateMatrix(Vector3 v1, Vector3 v2, Vector3 v3)
+        protected Matrix<double> CreateMatrix(Vector<double> v1, Vector<double> v2, Vector<double> v3, bool vectorsAsColumns = false)
         {
-            return new Matrix4x4(
-                v1.X, v2.X, v3.X, 0,
-                v1.Y, v2.Y, v3.Y, 0,
-                v1.Z, v2.Z, v3.Z, 0,
-                0, 0, 0, 1
-                );
+            return vectorsAsColumns ? Matrix<double>.Build.DenseOfColumnVectors(v1, v2, v3) : Matrix<double>.Build.DenseOfRowVectors(v1, v2, v3);
+        }
+
+        protected Matrix<double> OneDimensionalMatrix(Vector<double> v1, Vector<double> v2)
+        {
+            var arr1 = v1.AsArray();
+            var arr2 = v2.AsArray();
+            return Matrix<double>.Build.DenseOfRowArrays(new double[] {
+                arr1[0], arr1[1], arr1[2],
+                arr2[1], arr2[2],arr2[2]
+            });
         }
     }
     enum CordinateSystem
@@ -154,84 +315,35 @@ namespace Logic.Ahrs.Algorithms.Tyrex
     }
     public static class Extension
     {
-        public static bool Any(this Vector3 vector, Func<double, bool> condition)
+        public static Vector<double> ToVector(this double[] array)
         {
-            return condition.Invoke(vector.X) && condition.Invoke(vector.Y) && condition.Invoke(vector.Z);
+            return Vector<double>.Build.Dense(array);
         }
-        public static Vector3 Abs(this Vector3 vector)
+        public static float P(this float f, int p)
         {
-            return Vector3.Abs(vector);
+            return (float)Math.Pow(f, p);
+        }
+        public static double P(this double d, int p)
+        {
+            return Math.Pow(d, p);
         }
 
-        public static Matrix4x4 Add(this Matrix4x4 matrix, double add)
+        // is ok!
+        public static Vector<double> ForEach(this Vector<double> v, Func<double, double> set)
         {
-            float a = (float)add;
-            matrix.M11 += a;
-            matrix.M12 += a;
-            matrix.M13 += a;
-            matrix.M14 += a;
-            matrix.M21 += a;
-            matrix.M22 += a;
-            matrix.M23 += a;
-            matrix.M24 += a;
-            matrix.M31 += a;
-            matrix.M32 += a;
-            matrix.M33 += a;
-            matrix.M34 += a;
-            matrix.M41 += a;
-            matrix.M42 += a;
-            matrix.M43 += a;
-            matrix.M44 += a;
-            return matrix;
-        }
-        /* conversion between system matrix and mathnet matrix are tested and works */
-        /* mathnet matrix.pow could not take -1 exponent
-        public static Matrix4x4 Pow(this Matrix4x4 m, int exponent)
+            var arr = v.ToArray();
+            for (int i = 0; i < arr.Length; i++)
+            {
+                var any = arr[i];
+                arr[i] = set(any);
+            }
+            return arr.ToVector();
+        } // is ok (belong to method above)
+        public static Vector<double> SetAny(this Vector<double> v, Func<double, bool> cond, double value)
         {
-            var arr = new float[,] {
-                { m.M11, m.M12, m.M13, m.M14 },
-                { m.M21, m.M22, m.M23, m.M24 },
-                { m.M31, m.M32, m.M33, m.M34 },
-                { m.M41, m.M42, m.M43, m.M44 }
-            };
-            MathNet.Numerics.LinearAlgebra.Matrix<float> mathNetMatrix = MathNet.Numerics.LinearAlgebra.Matrix<float>.Build.DenseOfArray(arr);
-            var r = mathNetMatrix.Power(exponent);
-            return new Matrix4x4(
-                r[0, 0], r[0, 1], r[0, 2], r[0, 3],
-                r[1, 0], r[1, 1], r[1, 2], r[1, 3],
-                r[2, 0], r[2, 1], r[2, 2], r[2, 3],
-                r[3, 0], r[3, 1], r[3, 2], r[3, 3]
-                );
-        }
-        */
-        public static Matrix4x4 Inverse(this Matrix4x4 m)
-        {
-            Matrix4x4 invM;
-            Matrix4x4.Invert(m, out invM);
-            return invM;
-        }
-        public static Matrix4x4 Transpose(this Matrix4x4 m)
-        {
-            return Matrix4x4.Transpose(m);
-        }
-        public static Quaternion Multiply(this Quaternion q, double value)
-        {
-            var f = (float)value;
-            return Quaternion.Multiply(q, f);
-        }
-        public static Quaternion Divide(this Quaternion q, double value)
-        {
-            var f = (float)Math.Pow(value, -1); // as explicit division not being available
-            return Quaternion.Multiply(q, f);
-        }
-        public static Matrix4x4 Multiply(this Matrix4x4 m, double value)
-        {
-            var f = (float)value;
-            return Matrix4x4.Multiply(m, f);
+            return v.ForEach((any) => cond.Invoke(any) ? value : any);
         }
     }
     
 }
 
-/* Vector3 and Quaternion length() is same as mathnet matrix L2Norm(), which should
-   should be the same as matlab norm() */

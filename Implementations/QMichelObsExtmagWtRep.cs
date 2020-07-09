@@ -30,8 +30,10 @@ namespace Logic.Ahrs.Algorithms.Tyrex.Implementations
             MagUpdate = false;
         }
 
-        protected override Quaternion Update(Vector3 gyr, Vector3 acc, Vector3 mag, double dT)
+        // override 
+        protected Quaternion Update(Vector3 gyr, Vector3 acc, Vector3 mag, double dT)
         {
+            
             var magUpdate = Math.Abs(mag.Length() - MagRefNorm) < MagNormThreshold;
 
             // % Do not consider a magUpdate for next [timeMagNopert] seconds if a ~magUpdate is detected
@@ -41,11 +43,13 @@ namespace Logic.Ahrs.Algorithms.Tyrex.Implementations
             // % If we detect a perturbation, we replay all previous values from current time - [timeToSavePreviousData]
             // % to current time without magnetic field updates
 
+            // obj.oldValues(end + 1,:) = [0 dT gyr acc mag obj.quaternion];
+            // 1 + 1 + 3 + 3 + 3 + 4 -> 15 rows in oldValues
             if (MagUpdate && !magUpdate && OldValues.Count > 0)
             {
                 var tmpBeta = Beta;
                 Beta = 2;
-                Quaternion = OldValues[0].Quaternion;
+                //Quaternion = OldValues[0].Quaternion;
 
                 OldValues.ForEach((value) =>
                 {
@@ -71,11 +75,12 @@ namespace Logic.Ahrs.Algorithms.Tyrex.Implementations
             // % Use the normal filter
             updateInterval(gyr, acc, mag, dT, magUpdate);
             MagUpdate = magUpdate;
-
+            
             return Quaternion;
         }
         void updateInterval(Vector3 gyr, Vector3 acc, Vector3 mag, double dT, bool magUpdate)
         {
+            /*
             var q = Quaternion;
 
             acc /= acc.Length();
@@ -87,12 +92,12 @@ namespace Logic.Ahrs.Algorithms.Tyrex.Implementations
             var messure = CreateMatrix(acc, mag);
             var estimate = CreateMatrix(estimate_A, estimate_M);
 
-            // --- delta = 2 * [obj.Ka * skew(estimate_A) ; obj.Km * magUpdate * skew(estimate_M)]';
+            // delta = 2 * [obj.Ka * skew(estimate_A) ; obj.Km * magUpdate * skew(estimate_M)]';
             var a = Skew(estimate_A).Multiply(Ka);
             Matrix4x4? m = null;
             if(magUpdate)
             {
-                m = Skew(estimate_M).Multiply(Km);
+                //m = Skew(estimate_M).Multiply(Km);
             }
 
             Matrix4x4 am = a; // []
@@ -100,9 +105,11 @@ namespace Logic.Ahrs.Algorithms.Tyrex.Implementations
             {
                 am = Matrix4x4.Add(a, m.Value);
             }
-            
+            */
+
+            /*
             var delta = am.Transpose() * 2;
-            // ---
+            //
 
             var eye3 = Matrix4x4.Identity; // is diagonalidentity
 
@@ -111,15 +118,20 @@ namespace Logic.Ahrs.Algorithms.Tyrex.Implementations
             var gyrQ = new Quaternion(gyr.X, gyr.Y, gyr.Z, 0);
             var dqAsQ = System.Numerics.Quaternion.CreateFromRotationMatrix(dq); // matlab code seems to assume as if dq is a vector
 
-            // does order of (Quaternin)muliplication matter ..?
+            // does order of (Quaternion)muliplication matter ..?
             var qDot = (q * gyrQ).Multiply(0.5f) + (q * dqAsQ).Multiply(Beta);
             q += qDot.Multiply(dT);
             q = q.Divide(q.Length());
 
             Quaternion = q;
             Logic.Utils.Log.Message("QMichelObsExtmagWtRep quaternion became: " + Quaternion);
+            */
         }
 
+        protected override void Update(MathNet.Numerics.LinearAlgebra.Vector<double> gyr, MathNet.Numerics.LinearAlgebra.Vector<double> acc, MathNet.Numerics.LinearAlgebra.Vector<double> mag, double dT)
+        {
+            throw new NotImplementedException();
+        }
     }
     public class Value
     {
