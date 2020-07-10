@@ -43,7 +43,6 @@ namespace Logic.Ahrs.Algorithms.Tyrex
         {
             var magCalc = new Geo.Geomagnetism.IgrfGeomagnetismCalculator();// seems to be null always -> new Geo.Geomagnetism.GeomagnetismCalculator();
 
-            // location is null when algotithm is started!!!
             var location = new Location(57.7027141, 11.916687); // LocationService.Instance.Location
             var cordinate = new Geo.Coordinate(location.Latitude, location.Longitude);
             var geoMagRes = magCalc.TryCalculate(cordinate, DateTime.UtcNow.Date.AddYears(-7));
