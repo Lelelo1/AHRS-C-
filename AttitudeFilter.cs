@@ -5,6 +5,7 @@ using Logic.Models;
 
 using MathNet.Numerics.LinearAlgebra;
 using MathNet.Spatial.Euclidean;
+using MathNet.Spatial.Units;
 
 // translation of -> https://github.com/tyrex-team/benchmarks-attitude-smartphones/blob/master/src/Filters/AttitudeFilter.m
 namespace Logic.Ahrs.Algorithms.Tyrex
@@ -12,11 +13,9 @@ namespace Logic.Ahrs.Algorithms.Tyrex
     // extends 'handle' in matlab source code
     public abstract class AttitudeFilter : IAlgorithm
     {
-        public System.Numerics.Quaternion Quaternion => new System.Numerics.Quaternion((float)_Quaternion.ImagX, (float)_Quaternion.ImagY, (float)_Quaternion.ImagZ, (float)_Quaternion.Real);
+        public System.Numerics.Quaternion Quaternion => (ToMagnetic * _Quaternion).AsSystemQuaternion();
 
-        // seems to worsen result: // QTrueToMagnetic * value;
-        Quaternion _Q;
-        protected Quaternion _Quaternion { get => _Q; set => _Q = value; }
+        protected Quaternion _Quaternion { get; set; }
         protected Vector<double> AccRef { get; set; } // % Gravity vector in Earth Frame
         protected Vector<double> MagRef { get; set; } // % Magnetic vector in Magnetic Earth Frame
 
@@ -36,32 +35,69 @@ namespace Logic.Ahrs.Algorithms.Tyrex
         public bool HasInit { get; set; } = false;
         TaskCompletionSource<Location> HasLocation = new TaskCompletionSource<Location>();
 
-        Quaternion QMagneticToTrue { get; set; }
-        Quaternion QTrueToMagnetic => QMagneticToTrue.Inversed;
+        Quaternion ToTrue { get; set; }
+        Quaternion ToMagnetic { get; set; }
 
-        void Setup() // neccesary code from generateAttitude.m 
+        protected CordinateSystem CordinateSystem { get; set; } = CordinateSystem.ENU;
+
+        
+        void Setup()
         {
-            var magCalc = new Geo.Geomagnetism.IgrfGeomagnetismCalculator();// seems to be null always -> new Geo.Geomagnetism.GeomagnetismCalculator();
-
+            // createContextFromLocationAndDate.m
             var location = new Location(57.7027141, 11.916687); // LocationService.Instance.Location
+            var date = DateTime.UtcNow;//DateTime.UtcNow.Date.AddYears(-7);
+
+            var toNED = DCMToQuat(RotY(180) * RotZ(90));
+            var toENU = QuatInv(toNED);
+
+            var magCalc = new Geo.Geomagnetism.WmmGeomagnetismCalculator();
             var cordinate = new Geo.Coordinate(location.Latitude, location.Longitude);
-            var geoMagRes = magCalc.TryCalculate(cordinate, DateTime.UtcNow.Date.AddYears(-7));
-            // nanoTesla to microTesla
-            var magneticVector = Vector<double>.Build.Dense(new double[] { geoMagRes.X / 1000, geoMagRes.Y / 1000, geoMagRes.Z / 1000 });
-            QMagneticToTrue = DCMToQuat(Rotz(geoMagRes.Declination));
+            var geoMagRes = magCalc.TryCalculate(cordinate, date);
 
-            MagRef = Quatrotate(QTrueToMagnetic, magneticVector); // <-- 16.1640627580741, 7.37659378025057, 47.9757030654843
-            var gravityMagnitude = GeoidHeightsDotNet.GeoidHeights.undulation(location.Latitude, location.Latitude); // is -4.5 (is gAtLocation really?)
+            // %Magnetic field context & Transform nanoTesla to microTesla
+            var mX = geoMagRes.X / 1000;
+            var mY = geoMagRes.Y / 1000;
+            var mZ = geoMagRes.Z / 1000;
+            /*
+            // taken directly from world magentic model website
+            var northComp = 16110.5 / 1000;
+            var eastComp = 1181.1 / 1000;
+            var verticalComp = 48272.3 / 1000;
+            */
+
+            //var magneticVector = new double[] { mX, mY, mZ }.ToVector();
+            var magneticVector = new double[] { mX, mY, mZ }.ToVector();
+            var magneticDeclination = geoMagRes.Declination;
+
+            if (CordinateSystem == CordinateSystem.ENU)
+            {
+                magneticVector = Quatrotate(toENU, magneticVector);
+                magneticDeclination = -magneticDeclination;
+            }
+            
+            // % Gravity context
+            var gravityMagnitude = 9.81; // don't differ much and can be set arbitrarily in most use cases, can otherwise be set based on location
             var gravityVector = new double[] { 0, 0, -gravityMagnitude }.ToVector();
-            AccRef = Quatrotate(QTrueToMagnetic, gravityVector);
 
-            var c = (double)Math.Pow(10, -12); // 1e-12
-            Func<double, bool> when = (double value) => value < c;
-            MagRef = MagRef.SetAny(when, 0);
-            AccRef = AccRef.SetAny(when, 0);
+            if(CordinateSystem == CordinateSystem.ENU)
+            {
+                gravityVector = Quatrotate(toENU, gravityVector);
+            }
 
-            // checked magref and accref in matlab and my magref is not correctly constructed:
-            // magref: 16.1640627580741, 7.37659378025057, 47.9757030654843
+
+            // start generateAttitude.m
+            ToTrue = DCMToQuat(Rotz(magneticDeclination));
+            ToMagnetic = QuatInv(ToTrue);
+
+
+            MagRef = Quatrotate(ToMagnetic, magneticVector);
+            AccRef = Quatrotate(ToMagnetic, gravityVector);
+
+            Func<double, bool> where = (double value) => Math.Abs(value) < Math.Pow(10, -12);
+            MagRef = MagRef.SetAny(where, 0);
+            AccRef = AccRef.SetAny(where, 0);
+
+            // if bad vectors throw 'Reference vectors are not well constructed'
 
             ReferenceVectorChanged();
         }
@@ -77,7 +113,8 @@ namespace Logic.Ahrs.Algorithms.Tyrex
             acc /= Norm(acc);
             var M = Cross(acc, H);
 
-            var R = CreateMatrix(H, M, acc, vectorsAsColumns: true); // enu
+            acc = CordinateSystem == CordinateSystem.NED ? -acc : acc;
+            var R = CreateMatrix(H, M, acc, vectorsAsColumns: true); 
 
             var q = DCMToQuat(R);
             _Quaternion = q;
@@ -106,10 +143,16 @@ namespace Logic.Ahrs.Algorithms.Tyrex
         {
             MagRefNorm = Norm(MagRef);
             AccRefNorm = Norm(AccRef);
-            AccMagAngleRef = Math.Atan2(Norm(Cross(AccRef, MagRef)), Dot(AccRef, MagRef));
+            AccMagAngleRef = Math.Atan2(Norm(Cross(AccRef, MagRef)), Dot(AccRef, MagRef)); // not used anywhere currently
 
             MagRefNormalized = MagRef / MagRefNorm;
             AccRefNormalized = AccRef / AccRefNorm;
+        }
+
+        // is ok!
+        protected Quaternion QuatInv(Quaternion q)
+        {
+            return new Quaternion(q.Real, -q.ImagX, -q.ImagY, -q.ImagZ);
         }
 
         // is ok!
@@ -153,6 +196,16 @@ namespace Logic.Ahrs.Algorithms.Tyrex
             }
 
             return vo;
+        }
+
+        protected Matrix<double> RotY(double degs)
+        {
+            return Matrix3D.RotationAroundYAxis(Angle.FromDegrees(degs));
+        }
+
+        protected Matrix<double> RotZ(double degs)
+        {
+            return Matrix3D.RotationAroundZAxis(Angle.FromDegrees(degs));
         }
 
         // ok!
@@ -306,9 +359,8 @@ namespace Logic.Ahrs.Algorithms.Tyrex
             });
         }
     }
-    enum CordinateSystem
+    public enum CordinateSystem
     {
-        Uknown,
         ENU,
         NED
     }
@@ -341,6 +393,11 @@ namespace Logic.Ahrs.Algorithms.Tyrex
         public static Vector<double> SetAny(this Vector<double> v, Func<double, bool> cond, double value)
         {
             return v.ForEach((any) => cond.Invoke(any) ? value : any);
+        }
+
+        public static System.Numerics.Quaternion AsSystemQuaternion(this Quaternion q)
+        {
+            return new System.Numerics.Quaternion((float)q.ImagX, (float)q.ImagY, (float)q.ImagZ, (float)q.Real);
         }
     }
     
