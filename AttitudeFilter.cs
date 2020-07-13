@@ -64,6 +64,7 @@ namespace Logic.Ahrs.Algorithms.Tyrex
             var mY = geoMagRes.Y / 1000;
             var mZ = geoMagRes.Z / 1000;
 
+            // matlab is [16.1103, 1.1746, 48.2628]
             var magneticVector = new double[] { mX, mY, mZ }.ToVector();
             // mine %v = [-3.32527858581955, 16.156762327648, -48.2670628388773];
             // test matlab 0.8465   22.8248  -41.3634
@@ -84,9 +85,6 @@ namespace Logic.Ahrs.Algorithms.Tyrex
                 gravityVector = Quatrotate(toENU, gravityVector);
             }
 
-            //magnetic declination: Mine -4.19322488655381. Matlab -2.1241
-
-            magneticVector = new double[] { 0.8465, 22.8248, -41.3634 }.ToVector();
             // start generateAttitude.m
             ToTrue = DCMToQuat(Rotz(magneticDeclination)); // 0.999330236733822 0 0 0.036593556739323
             ToMagnetic = QuatInv(ToTrue); // 0.999 0 0 -0.0366122580820162
@@ -96,14 +94,14 @@ namespace Logic.Ahrs.Algorithms.Tyrex
             AccRef = Quatrotate(ToMagnetic, gravityVector);
             // MagRef[0] = 0; // almost same but creates a drift leftwards
 
-            Func<double, bool> where = (double value) => Math.Abs(value) < Math.Pow(10, -12);
+            Func<double, bool> where = (double value) => Math.Abs(value) < Math.Pow(10, -6); // was originally 1e-12
             MagRef = MagRef.SetAny(where, 0);
             AccRef = AccRef.SetAny(where, 0);
 
-            // MagRef = [-0.8239503291328, 22.8256251424549, -41.3634]
 
             var mValue = MagRef.BoolVector((value) => Math.Abs(value) > 0).Sum();
             var aValue = AccRef.BoolVector((value) => Math.Abs(value) > 0).Sum();
+            // potentially always set x to 0 or remove check?
             if(mValue != 2 || aValue != 1)
             {
                 Console.WriteLine("Warning, Reference vectors are not well constructed, AttitudeFilter.cs"); // % This should never happen
