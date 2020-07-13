@@ -7,6 +7,8 @@ using MathNet.Numerics.LinearAlgebra;
 using MathNet.Spatial.Euclidean;
 using MathNet.Spatial.Units;
 
+using System.Linq;
+
 // translation of -> https://github.com/tyrex-team/benchmarks-attitude-smartphones/blob/master/src/Filters/AttitudeFilter.m
 namespace Logic.Ahrs.Algorithms.Tyrex
 {
@@ -43,6 +45,9 @@ namespace Logic.Ahrs.Algorithms.Tyrex
         
         void Setup()
         {
+
+            Console.WriteLine("doing setup");
+
             // createContextFromLocationAndDate.m
             var location = new Location(57.7027141, 11.916687); // LocationService.Instance.Location
             var date = DateTime.UtcNow;//DateTime.UtcNow.Date.AddYears(-7);
@@ -58,15 +63,10 @@ namespace Logic.Ahrs.Algorithms.Tyrex
             var mX = geoMagRes.X / 1000;
             var mY = geoMagRes.Y / 1000;
             var mZ = geoMagRes.Z / 1000;
-            /*
-            // taken directly from world magentic model website
-            var northComp = 16110.5 / 1000;
-            var eastComp = 1181.1 / 1000;
-            var verticalComp = 48272.3 / 1000;
-            */
 
-            //var magneticVector = new double[] { mX, mY, mZ }.ToVector();
             var magneticVector = new double[] { mX, mY, mZ }.ToVector();
+            // mine %v = [-3.32527858581955, 16.156762327648, -48.2670628388773];
+            // test matlab 0.8465   22.8248  -41.3634
             var magneticDeclination = geoMagRes.Declination;
 
             if (CordinateSystem == CordinateSystem.ENU)
@@ -84,21 +84,31 @@ namespace Logic.Ahrs.Algorithms.Tyrex
                 gravityVector = Quatrotate(toENU, gravityVector);
             }
 
+            //magnetic declination: Mine -4.19322488655381. Matlab -2.1241
 
+            magneticVector = new double[] { 0.8465, 22.8248, -41.3634 }.ToVector();
             // start generateAttitude.m
-            ToTrue = DCMToQuat(Rotz(magneticDeclination));
-            ToMagnetic = QuatInv(ToTrue);
+            ToTrue = DCMToQuat(Rotz(magneticDeclination)); // 0.999330236733822 0 0 0.036593556739323
+            ToMagnetic = QuatInv(ToTrue); // 0.999 0 0 -0.0366122580820162
 
-
+            // MagRef = new double[] { -0.000, 22.8405, -41.3634 }.ToVector(); // more or less the same
             MagRef = Quatrotate(ToMagnetic, magneticVector);
             AccRef = Quatrotate(ToMagnetic, gravityVector);
+            // MagRef[0] = 0; // almost same but creates a drift leftwards
 
             Func<double, bool> where = (double value) => Math.Abs(value) < Math.Pow(10, -12);
             MagRef = MagRef.SetAny(where, 0);
             AccRef = AccRef.SetAny(where, 0);
 
-            // if bad vectors throw 'Reference vectors are not well constructed'
+            // MagRef = [-0.8239503291328, 22.8256251424549, -41.3634]
 
+            var mValue = MagRef.BoolVector((value) => Math.Abs(value) > 0).Sum();
+            var aValue = AccRef.BoolVector((value) => Math.Abs(value) > 0).Sum();
+            if(mValue != 2 || aValue != 1)
+            {
+                Console.WriteLine("Warning, Reference vectors are not well constructed, AttitudeFilter.cs"); // % This should never happen
+            }
+            
             ReferenceVectorChanged();
         }
 
@@ -180,9 +190,21 @@ namespace Logic.Ahrs.Algorithms.Tyrex
 
             if (form == "long")
             {
-                var x = vx * (qw.P(2) + qx.P(2) - qy.P(2) - qz.P(2)) + vy * (2 * qw * qz + 2 * qx * qy) - vz * (2 * qw * qy - 2 * qx * qz);
-                var y = vy * (qw.P(2) - qx.P(2) + qy.P(2) - qz.P(2)) - vx * (2 * qw * qz - 2 * qx * qy) + vz * (2 * qw * qx + 2 * qy * qz);
-                var z = vz * (qw.P(2) - qx.P(2) - qy.P(2) + qz.P(2)) + vx * (2 * qw * qy + 2 * qx * qz) - vy * (2 * qw * qx - 2 * qy * qz);
+                // seperate expressions for easier debugging
+                var xFirst = vx * (qw.P(2) + qx.P(2) - qy.P(2) - qz.P(2));
+                var xSecond = vy * (2 * qw * qz + 2 * qx * qy);
+                var xThird = vz * (2 * qw * qy - 2 * qx * qz);
+                var x = xFirst + xSecond - xThird;
+
+                var yFirst = vy * (qw.P(2) - qx.P(2) + qy.P(2) - qz.P(2));
+                var ySecond = vx * (2 * qw * qz - 2 * qx * qy);
+                var yThird = vz * (2 * qw * qx + 2 * qy * qz);
+                var y = yFirst - ySecond  + yThird;
+
+                var zFirst = vz * (qw.P(2) - qx.P(2) - qy.P(2) + qz.P(2));
+                var zSecond = vx * (2 * qw * qy + 2 * qx * qz);
+                var zThird = vy * (2 * qw * qx - 2 * qy * qz);
+                var z = zFirst + zSecond - zThird;
 
                 vo = new double[] { x, y, z }.ToVector();
             }
@@ -379,21 +401,38 @@ namespace Logic.Ahrs.Algorithms.Tyrex
             return Math.Pow(d, p);
         }
 
-        // is ok!
-        public static Vector<double> ForEach(this Vector<double> v, Func<double, double> set)
+
+        public static Vector<double> SetAny(this Vector<double> v, Func<double, bool> condition, double value)
         {
-            var arr = v.ToArray();
-            for (int i = 0; i < arr.Length; i++)
+
+            Func<int, double> setter = (i) =>
             {
-                var any = arr[i];
-                arr[i] = set(any);
-            }
-            return arr.ToVector();
-        } // is ok (belong to method above)
-        public static Vector<double> SetAny(this Vector<double> v, Func<double, bool> cond, double value)
+                var any = v[i];
+                return condition.Invoke(any) ? value : any;
+            };
+
+            return SetVector(v, setter);
+        } // abs(v) > 0 matlab syntax, returns 1 or 0 on each element
+        public static Vector<double> BoolVector(this Vector<double> v, Func<double, bool> condition)
         {
-            return v.ForEach((any) => cond.Invoke(any) ? value : any);
+            var newV = new double[] { v[0], v[1], v[2] }.ToVector();
+
+            Func<int, double> setter = (i) =>
+            {
+                var any = newV[i];
+                return condition.Invoke(any) ? 1 : 0;
+            };
+            return SetVector(newV, setter);
         }
+        static Vector<double> SetVector(Vector<double> v, Func<int, double> set)
+        {
+            for (int i = 0; i < v.Count; i++)
+            {
+                v[i] = set.Invoke(i);
+            };
+            return v;
+        }
+
 
         public static System.Numerics.Quaternion AsSystemQuaternion(this Quaternion q)
         {
@@ -403,3 +442,6 @@ namespace Logic.Ahrs.Algorithms.Tyrex
     
 }
 
+
+
+// I also noticed that `filter.MagRef = quatrotate(qTrueToMagnetic, context.magnetic.vector);` operation creates a `x = 0` in the vector which is necessary to pass the check()

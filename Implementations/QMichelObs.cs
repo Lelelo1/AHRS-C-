@@ -31,7 +31,6 @@ namespace Logic.Ahrs.Algorithms.Tyrex.Implementations
             var delta = 2 * Combined(Ka * Skew(estimate_A), Km * Skew(estimate_M)).Transpose();
 
             // ((delta * delta' + 1e-5 * eye(3))^-1 * delta)'
-
             var eye = Matrix<double>.Build.DenseIdentity(3, 3);
 
             var dq = (messure - estimate) * ((delta * delta.Transpose() + 0.00001 * eye).Inverse() * delta).Transpose();
